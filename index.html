@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Случайная перемотка</title>
+<style>
+:root {
+  --bg: #f3f2ef; --panel: #ffffff; --fg: #1d1c1a; --muted: #6d6a64; --line: #d9d6cf;
+  --accent: #e0431f; --wave: #c4c0b6; --wave-played: #1d1c1a;
+  --font-display: "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, Menlo, Consolas, monospace;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #151514; --panel: #1e1e1c; --fg: #ecebe6; --muted: #98958d; --line: #33322f; --accent: #ff6a43; --wave: #4a4943; --wave-played: #ecebe6; }
+}
+* { box-sizing: border-box; }
+html { color-scheme: light dark; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 var(--font-display); padding: 24px 16px 40px; }
+main { max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+h1 { font-size: 1.8rem; line-height: 1.1; margin: 0; font-weight: 700; }
+.lead { margin: 6px 0 0; color: var(--muted); font-size: 0.95rem; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.panel h2 { margin: 0; font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+input[type=file] { font: 400 0.9rem var(--font-display); color: var(--fg); max-width: 100%; }
+#fname { font: 400 0.8rem var(--font-mono); color: var(--muted); overflow-wrap: anywhere; }
+canvas { display: block; width: 100%; height: 110px; cursor: pointer; border-radius: 4px; touch-action: pan-y; }
+.times { display: flex; justify-content: space-between; font: 400 0.8rem var(--font-mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.btns { display: flex; gap: 10px; flex-wrap: wrap; }
+.btn { font: 600 0.95rem var(--font-display); border: 1px solid var(--fg); background: transparent; color: var(--fg); padding: 11px 18px; border-radius: 6px; cursor: pointer; }
+.btn:hover { background: var(--fg); color: var(--bg); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; min-width: 120px; }
+.btn.primary:hover { filter: brightness(1.08); background: var(--accent); color: #fff; }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.row { display: flex; flex-direction: column; gap: 6px; }
+.row label.l { display: flex; justify-content: space-between; font-size: 0.9rem; font-weight: 600; gap: 12px; }
+.row output { font: 500 0.85rem var(--font-mono); font-variant-numeric: tabular-nums; color: var(--accent); }
+input[type=range] { width: 100%; accent-color: var(--accent); }
+.seg { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { flex: 1; font: 600 0.85rem var(--font-display); padding: 10px 8px; background: transparent; color: var(--muted); border: 0; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+.note { font-size: 0.8rem; color: var(--muted); margin: 0; }
+.chk { display: flex; gap: 10px; align-items: flex-start; font-size: 0.9rem; }
+.chk input { margin-top: 3px; accent-color: var(--accent); }
+.chk small { display: block; color: var(--muted); font-size: 0.78rem; }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Случайная перемотка</h1>
+    <p class="lead">Загрузите трек, и он будет сам перескакивать в другое место, как если бы вы водили пальцем по ползунку.</p>
+  </header>
+
+  <section class="panel" aria-label="Трек">
+    <input id="file" type="file">
+    <span id="fname">Файл не выбран. Он остаётся на вашем устройстве.</span>
+    <canvas id="wave" aria-label="Форма волны. Нажмите или проведите пальцем, чтобы перейти в это место"></canvas>
+    <div class="times"><span id="tcur">0:00</span><span id="jc">прыжков: 0</span><span id="tdur">0:00</span></div>
+    <div class="btns">
+      <button class="btn primary" id="play" type="button" disabled>Играть</button>
+      <button class="btn" id="jumpnow" type="button" disabled>Прыгнуть сейчас</button>
+      <button class="btn" id="rev" type="button" aria-pressed="false" disabled>Реверс</button>
+    </div>
+  </section>
+
+  <section class="panel" aria-label="Прыжки">
+    <h2>Прыжки</h2>
+    <div class="row">
+      <div class="seg" role="group" aria-label="Режим прыжков">
+        <button type="button" id="m-near" aria-pressed="true">Вперёд и назад</button>
+        <button type="button" id="m-any" aria-pressed="false">Куда угодно</button>
+      </div>
+    </div>
+    <div class="row">
+      <label class="l" for="interval"><span>Прыжок каждые</span><output id="o-interval"></output></label>
+      <input id="interval" type="range" autocomplete="off" min="0.5" max="15" step="0.5" value="3">
+    </div>
+    <div class="row">
+      <label class="l" for="jit"><span>Разброс времени</span><output id="o-jit"></output></label>
+      <input id="jit" type="range" autocomplete="off" min="0" max="80" step="5" value="0">
+      <p class="note">Интервал будет случайно меняться, чтобы прыжки не звучали как метроном.</p>
+    </div>
+    <div class="row" id="rangeRow">
+      <label class="l" for="range"><span>Дальность прыжка</span><output id="o-range"></output></label>
+      <input id="range" type="range" autocomplete="off" min="3" max="120" step="1" value="30">
+      <p class="note">До упора вправо: без ограничения, прыжок в любую точку трека.</p>
+    </div>
+  </section>
+
+  <section class="panel" aria-label="Звук">
+    <h2>Звук</h2>
+    <div class="row">
+      <label class="l" for="xf"><span>Сглаживание стыков и паузы</span><output id="o-xf"></output></label>
+      <input id="xf" type="range" autocomplete="off" min="0" max="2000" step="50" value="400">
+    </div>
+    <div class="row">
+      <label class="l" for="vol"><span>Громкость</span><output id="o-vol"></output></label>
+      <input id="vol" type="range" autocomplete="off" min="0" max="100" step="1" value="80">
+    </div>
+    <label class="chk"><input type="checkbox" id="wake" checked><span>Не гасить экран во время игры<small>Если экран гаснет, браузер может остановить звук.</small></span></label>
+    <label class="chk"><input type="checkbox" id="bg"><span>Играть при выключенном экране (пробный режим)<small>Звук идёт через системный проигрыватель браузера. Если пропал звук, отключите.</small></span></label>
+  </section>
+  <p class="note">Пробел: играть и пауза. Стрелка вправо: прыгнуть сейчас. R: реверс.</p>
+</main>
+
+<script>
+window.onerror = function (m, u, l) { var e = document.getElementById('fname'); if (e) e.textContent = 'Ошибка скрипта: ' + m + ' (строка ' + l + ')'; };
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var ctx = null, master = null, dest = null, bgEl = null, buf = null, peaks = null;
+  var cur = null, segPos = 0, segTime = 0, segDir = 1, playing = false, pausedPos = 0, timer = null;
+  var rev = false, rbuf = null; // rbuf: копия трека, записанная задом наперёд (создаётся при первом реверсе)
+  var jumps = [], jumpCount = 0, mode = 'near', raf = 0, lastFrame = 0, wakeLock = null, fname = '';
+  var cache = null; // готовые картинки волны, чтобы не перерисовывать 700 столбцов каждый кадр
+
+  function fmt(s) { s = Math.max(0, s | 0); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
+  function css(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+  function val(id) { return parseFloat($(id).value); }
+  function dec(v) { return String(v).replace('.', ','); }
+  function pos() {
+    if (!buf) return 0;
+    return playing ? Math.max(0, Math.min(buf.duration, segPos + segDir * (ctx.currentTime - segTime))) : pausedPos;
+  }
+
+  /* ---------- настройки ---------- */
+  var KEY = 'randomSeek.v3';
+  var fmts = {
+    interval: function (v) { return dec(v) + ' с'; },
+    jit: function (v) { return v === 0 ? 'нет' : '±' + v + '%'; },
+    range: function (v) { return v >= 120 ? 'без ограничения' : '±' + v + ' с'; },
+    xf: function (v) { return v === 0 ? 'выкл' : dec(v / 1000) + ' с'; },
+    vol: function (v) { return v + '%'; }
+  };
+  function save() {
+    try {
+      var o = { mode: mode, wake: $('wake').checked, bg: $('bg').checked };
+      Object.keys(fmts).forEach(function (k) { o[k] = $(k).value; });
+      localStorage.setItem(KEY, JSON.stringify(o));
+    } catch (e) {}
+  }
+  function load() {
+    try {
+      var o = JSON.parse(localStorage.getItem(KEY) || 'null');
+      if (!o) return;
+      Object.keys(fmts).forEach(function (k) { if (o[k] != null) $(k).value = o[k]; });
+      if (o.mode) mode = o.mode;
+      if (o.wake != null) $('wake').checked = !!o.wake;
+      if (o.bg != null) $('bg').checked = !!o.bg;
+    } catch (e) {}
+  }
+  Object.keys(fmts).forEach(function (k) {
+    $(k).addEventListener('input', function () { $('o-' + k).textContent = fmts[k](val(k)); save(); });
+  });
+  function refreshOutputs() { Object.keys(fmts).forEach(function (k) { $('o-' + k).textContent = fmts[k](val(k)); }); }
+  $('vol').addEventListener('input', function () { if (master) master.gain.value = val('vol') / 100; });
+
+  function setMode(m) {
+    mode = m;
+    $('m-near').setAttribute('aria-pressed', String(m === 'near'));
+    $('m-any').setAttribute('aria-pressed', String(m === 'any'));
+    $('rangeRow').hidden = m !== 'near';
+    save();
+  }
+  $('m-near').onclick = function () { setMode('near'); };
+  $('m-any').onclick = function () { setMode('any'); };
+
+  /* ---------- аудио ---------- */
+  function ensureCtx() {
+    if (ctx) return;
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    master = ctx.createGain();
+    master.gain.value = val('vol') / 100;
+    route();
+  }
+  function route() {
+    if (!ctx) return;
+    try { master.disconnect(); } catch (e) {}
+    if ($('bg').checked && ctx.createMediaStreamDestination) {
+      if (!dest) {
+        dest = ctx.createMediaStreamDestination();
+        bgEl = new Audio();
+        bgEl.srcObject = dest.stream;
+      }
+      master.connect(dest);
+      if (playing) bgEl.play().catch(function () {});
+    } else {
+      master.connect(ctx.destination);
+      if (bgEl) bgEl.pause();
+    }
+  }
+  $('bg').addEventListener('change', function () { route(); save(); });
+
+  $('file').addEventListener('change', function () {
+    var f = this.files && this.files[0];
+    if (!f) return;
+    stop();
+    fname = f.name;
+    $('fname').textContent = 'Загрузка: ' + f.name;
+    $('play').disabled = true; $('jumpnow').disabled = true; $('rev').disabled = true;
+    ensureCtx();
+    f.arrayBuffer().then(function (ab) {
+      return new Promise(function (res, rej) { ctx.decodeAudioData(ab, res, rej); });
+    }).then(function (b) {
+      buf = b; rbuf = null; pausedPos = 0; jumps = []; jumpCount = 0;
+      peaks = computePeaks(b, 700);
+      cache = null;
+      $('fname').textContent = fname;
+      $('tdur').textContent = fmt(b.duration);
+      $('play').disabled = false; $('jumpnow').disabled = false; $('rev').disabled = false;
+      $('jc').textContent = 'прыжков: 0';
+      setMeta();
+      draw();
+    }).catch(function () {
+      $('fname').textContent = 'Не удалось прочитать файл. Подойдут mp3, m4a, ogg, wav, flac.';
+    });
+  });
+
+  function computePeaks(b, n) {
+    var d = b.getChannelData(0), step = Math.max(1, Math.floor(d.length / n)), out = new Float32Array(n), m = 0;
+    for (var i = 0; i < n; i++) {
+      var mx = 0, s = i * step, e = Math.min(d.length, s + step);
+      for (var j = s; j < e; j += 16) { var a = Math.abs(d[j]); if (a > mx) mx = a; }
+      out[i] = mx; if (mx > m) m = mx;
+    }
+    if (m > 0) for (var k = 0; k < n; k++) out[k] /= m;
+    return out;
+  }
+
+  // Громкость вручную: AudioParam.value в Firefox во время плавного изменения не обновляется.
+  function lvl(c, t) { return c.xf > 0 ? Math.min(1, Math.max(0, (t - c.t0) / c.xf)) : 1; }
+
+  function getRev() {
+    if (rbuf) return rbuf;
+    rbuf = ctx.createBuffer(buf.numberOfChannels, buf.length, buf.sampleRate);
+    for (var ch = 0; ch < buf.numberOfChannels; ch++) {
+      var s = buf.getChannelData(ch), d = rbuf.getChannelData(ch), n = s.length;
+      for (var i = 0; i < n; i++) d[i] = s[n - 1 - i];
+    }
+    return rbuf;
+  }
+
+  function startAt(p) {
+    var xf = Math.min(val('xf') / 1000, val('interval') * 0.5), t = ctx.currentTime;
+    var src = ctx.createBufferSource(); src.buffer = rev ? getRev() : buf;
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(xf > 0 ? 0 : 1, t);
+    if (xf > 0) g.gain.linearRampToValueAtTime(1, t + xf);
+    src.connect(g); g.connect(master);
+    var off = rev ? buf.duration - p : p;
+    off = Math.min(Math.max(0, off), buf.duration - 0.05);
+    src.start(t, off);
+    p = rev ? buf.duration - off : off;
+    segDir = rev ? -1 : 1;
+    if (cur) {
+      var old = cur, fd = Math.max(xf, 0.005);
+      old.g.gain.cancelScheduledValues(t);
+      old.g.gain.setValueAtTime(lvl(old, t), t);
+      old.g.gain.linearRampToValueAtTime(0, t + fd);
+      try { old.src.stop(t + fd + 0.02); } catch (e) {}
+    }
+    cur = { src: src, g: g, t0: t, xf: xf };
+    segPos = p; segTime = t;
+  }
+
+  function nextPos() {
+    var d = buf.duration, p = pos(), end = Math.max(0.1, d - 0.5);
+    var r = val('range');
+    if (mode === 'any' || r >= 120) return Math.random() * end;
+    var delta = (Math.random() * 2 - 1) * r, min = Math.min(r * 0.2, 3);
+    if (Math.abs(delta) < min) delta = delta < 0 ? -min : min;
+    var n = p + delta;
+    if (n < 0 || n > end) n = p - delta;
+    return Math.min(end, Math.max(0, n));
+  }
+
+  function jump() {
+    var from = pos(), to = nextPos();
+    startAt(to);
+    jumps.push({ from: from, to: to, at: performance.now() });
+    if (jumps.length > 12) jumps.shift();
+    jumpCount++;
+    $('jc').textContent = 'прыжков: ' + jumpCount;
+  }
+
+  function schedule() {
+    clearTimeout(timer);
+    var base = val('interval') * 1000, j = val('jit') / 100;
+    var wait = Math.max(300, base * (1 + (Math.random() * 2 - 1) * j));
+    timer = setTimeout(function () {
+      if (!playing) return;
+      jump(); schedule();
+    }, wait);
+  }
+
+  /* ---------- воспроизведение ---------- */
+  function play() {
+    if (!buf) return;
+    ensureCtx();
+    ctx.resume();
+    playing = true;
+    try { if (window.Android) Android.setPlaying(true, fname); } catch (e) {}
+    if ($('bg').checked && bgEl) bgEl.play().catch(function () {});
+    startAt(rev ? (pausedPos <= 0.2 ? buf.duration : pausedPos) : (pausedPos >= buf.duration - 0.2 ? 0 : pausedPos));
+    $('play').textContent = 'Пауза';
+    lockScreen();
+    schedule(); loop();
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+  }
+  function stop() {
+    if (!playing) return;
+    pausedPos = pos();
+    playing = false;
+    try { if (window.Android) Android.setPlaying(false, ''); } catch (e) {}
+    clearTimeout(timer);
+    var fd = 0;
+    if (cur) {
+      var t = ctx.currentTime, old = cur;
+      fd = Math.max(val('xf') / 1000, 0.01);
+      old.g.gain.cancelScheduledValues(t);
+      old.g.gain.setValueAtTime(lvl(old, t), t);
+      old.g.gain.linearRampToValueAtTime(0, t + fd);
+      try { old.src.stop(t + fd + 0.02); } catch (e) {}
+      cur = null;
+    }
+    if (bgEl) setTimeout(function () { if (!playing) bgEl.pause(); }, fd * 1000 + 100);
+    $('play').textContent = 'Играть';
+    unlockScreen();
+    draw();
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+  }
+  function toggle() { playing ? stop() : play(); }
+  function jumpNow() {
+    if (!buf) return;
+    if (!playing) play();
+    jump(); schedule();
+  }
+  function toggleRev() {
+    if (!buf) return;
+    rev = !rev;
+    $('rev').setAttribute('aria-pressed', String(rev));
+    $('rev').textContent = rev ? 'Реверс: вкл' : 'Реверс';
+    if (playing) { startAt(pos()); schedule(); }
+  }
+  $('rev').onclick = toggleRev;
+  $('play').onclick = toggle;
+  $('jumpnow').onclick = jumpNow;
+
+  document.addEventListener('keydown', function (e) {
+    var tag = e.target && e.target.tagName;
+    if (tag === 'BUTTON' || tag === 'INPUT') return;
+    if (e.code === 'Space') { e.preventDefault(); if (buf) toggle(); }
+    if (e.code === 'ArrowRight') { e.preventDefault(); jumpNow(); }
+    if (e.code === 'KeyR') toggleRev();
+  });
+
+  /* ---------- экран и системные кнопки ---------- */
+  function lockScreen() {
+    if (!$('wake').checked || !navigator.wakeLock || wakeLock) return;
+    navigator.wakeLock.request('screen').then(function (l) {
+      wakeLock = l;
+      l.addEventListener('release', function () { wakeLock = null; });
+    }).catch(function () {});
+  }
+  function unlockScreen() { if (wakeLock) { wakeLock.release().catch(function () {}); wakeLock = null; } }
+  $('wake').addEventListener('change', function () { save(); if (this.checked) { if (playing) lockScreen(); } else unlockScreen(); });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden && playing) lockScreen(); });
+
+  function setMeta() {
+    if (!('mediaSession' in navigator) || !window.MediaMetadata) return;
+    navigator.mediaSession.metadata = new MediaMetadata({ title: fname, artist: 'Случайная перемотка' });
+    try {
+      navigator.mediaSession.setActionHandler('play', function () { if (!playing) play(); });
+      navigator.mediaSession.setActionHandler('pause', function () { if (playing) stop(); });
+      navigator.mediaSession.setActionHandler('nexttrack', function () { jumpNow(); });
+    } catch (e) {}
+  }
+
+  /* ---------- волна ---------- */
+  var cv = $('wave'), dragging = false, lastScrub = 0;
+  function seekFromEvent(e, force) {
+    if (!buf) return;
+    var now = performance.now();
+    if (!force && now - lastScrub < 70) return;
+    lastScrub = now;
+    var r = cv.getBoundingClientRect();
+    var p = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * buf.duration;
+    if (playing) { startAt(p); schedule(); } else { pausedPos = p; draw(); }
+  }
+  cv.addEventListener('pointerdown', function (e) {
+    dragging = true;
+    try { cv.setPointerCapture(e.pointerId); } catch (x) {}
+    seekFromEvent(e, true);
+  });
+  cv.addEventListener('pointermove', function (e) { if (dragging) seekFromEvent(e, false); });
+  function endDrag(e) { if (dragging) { dragging = false; seekFromEvent(e, true); } }
+  cv.addEventListener('pointerup', endDrag);
+  cv.addEventListener('pointercancel', function () { dragging = false; });
+
+  function buildCache(w, h, dpr) {
+    var colors = [css('--wave'), css('--wave-played')], layers = [];
+    for (var L = 0; L < 2; L++) {
+      var oc = document.createElement('canvas');
+      oc.width = Math.round(w * dpr); oc.height = Math.round(h * dpr);
+      var c = oc.getContext('2d');
+      c.scale(dpr, dpr);
+      c.fillStyle = colors[L];
+      var n = peaks.length, bw = w / n;
+      for (var i = 0; i < n; i++) {
+        var bh = Math.max(2, peaks[i] * (h - 8));
+        c.fillRect(i * bw, (h - bh) / 2, Math.max(1, bw - 1), bh);
+      }
+      layers.push(oc);
+    }
+    return { w: w, h: h, dpr: dpr, theme: colors.join('|'), base: layers[0], played: layers[1] };
+  }
+
+  function draw() {
+    var dpr = window.devicePixelRatio || 1;
+    var w = cv.clientWidth, h = cv.clientHeight;
+    if (!w) return;
+    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+    var c = cv.getContext('2d');
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    c.clearRect(0, 0, w, h);
+    var p = pos(), d = buf ? buf.duration : 1, x = p / d * w;
+    $('tcur').textContent = fmt(p);
+    if (!peaks) { c.fillStyle = css('--wave'); c.fillRect(0, h / 2 - 1, w, 2); return; }
+    var themeKey = css('--wave') + '|' + css('--wave-played');
+    if (!cache || cache.w !== w || cache.h !== h || cache.dpr !== dpr || cache.theme !== themeKey) cache = buildCache(w, h, dpr);
+    c.drawImage(cache.base, 0, 0, w, h);
+    c.save();
+    c.beginPath(); c.rect(0, 0, x, h); c.clip();
+    c.drawImage(cache.played, 0, 0, w, h);
+    c.restore();
+    var acc = css('--accent'), now = performance.now();
+    c.strokeStyle = acc; c.fillStyle = acc; c.lineWidth = 1;
+    for (var k = 0; k < jumps.length; k++) {
+      var j = jumps[k], age = (now - j.at) / 4000;
+      if (age > 1) continue;
+      c.globalAlpha = 1 - age;
+      var fx = j.from / d * w, tx = j.to / d * w;
+      c.beginPath(); c.moveTo(fx, h - 2); c.lineTo(fx, h * 0.55); c.stroke();
+      c.beginPath(); c.moveTo(fx, h - 6); c.lineTo(tx, h - 6); c.stroke();
+      c.fillRect(tx - 2, h - 9, 4, 6);
+    }
+    c.globalAlpha = 1;
+    c.fillRect(Math.round(x) - 1, 0, 2, h);
+  }
+
+  function loop() {
+    cancelAnimationFrame(raf);
+    function f(ts) {
+      if (!playing) return;
+      var pp = pos();
+      if (segDir > 0 ? pp >= buf.duration - 0.05 : pp <= 0.05) { jump(); schedule(); }
+      if (ts - lastFrame > 33) { lastFrame = ts; draw(); } // около 30 кадров в секунду достаточно
+      raf = requestAnimationFrame(f);
+    }
+    raf = requestAnimationFrame(f);
+  }
+
+  load();
+  refreshOutputs();
+  setMode(mode);
+  if (window.Android) { var bgc = $('bg'); bgc.checked = false; bgc.closest('label').hidden = true; }
+  window.addEventListener('resize', function () { cache = null; draw(); });
+  draw();
+})();
+</script>
+</body>
+</html>
