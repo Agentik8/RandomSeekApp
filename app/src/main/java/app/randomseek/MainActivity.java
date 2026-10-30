@@ -4,14 +4,27 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.OpenableColumns;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
+import android.webkit.WebViewClient;
 import android.webkit.WebView;
+
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.HashMap;
 
 public class MainActivity extends Activity {
     private static final int REQ_FILE = 1;
@@ -21,6 +34,14 @@ public class MainActivity extends Activity {
     public static MainActivity instance;
 
     public class Bridge {
+        // Имя последнего открытого трека; пустая строка, если его ещё не было.
+        @JavascriptInterface
+        public String lastName() {
+            File f = new File(getFilesDir(), "last_track");
+            if (!f.exists()) return "";
+            return getSharedPreferences("app", MODE_PRIVATE).getString("last_name", "");
+        }
+
         @JavascriptInterface
         public void setPlaying(final boolean playing, final String title, final String artist) {
             runOnUiThread(new Runnable() {
@@ -70,15 +91,37 @@ public class MainActivity extends Activity {
                 return true;
             }
         });
-        web.loadUrl("file:///android_asset/index.html");
+        // Страница и последний трек отдаются с условного адреса: так у страницы постоянный
+        // источник (настройки сохраняются), и она может прочитать сохранённый файл.
+        web.setWebViewClient(new WebViewClient() {
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest req) {
+                Uri u = req.getUrl();
+                if (!"appassets.local".equals(u.getHost())) return null;
+                String path = u.getPath();
+                try {
+                    if ("/last".equals(path)) {
+                        File f = new File(getFilesDir(), "last_track");
+                        if (f.exists()) return new WebResourceResponse("application/octet-stream", null, new FileInputStream(f));
+                    } else if ("/".equals(path) || "/index.html".equals(path)) {
+                        return new WebResourceResponse("text/html", "utf-8", getAssets().open("index.html"));
+                    }
+                } catch (Exception e) { /* отдадим 404 ниже */ }
+                return new WebResourceResponse("text/plain", "utf-8", 404, "Not Found",
+                        new HashMap<String, String>(), new ByteArrayInputStream(new byte[0]));
+            }
+        });
+        web.loadUrl("https://appassets.local/index.html");
     }
 
     @Override
     protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
         if (req == REQ_FILE && chooser != null) {
-            chooser.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(res, data));
+            Uri[] uris = WebChromeClient.FileChooserParams.parseResult(res, data);
+            chooser.onReceiveValue(uris);
             chooser = null;
+            if (uris != null && uris.length > 0) saveLast(uris[0]);
         }
     }
 
@@ -86,6 +129,38 @@ public class MainActivity extends Activity {
     @Override
     public void onBackPressed() {
         moveTaskToBack(true);
+    }
+
+    // Копируем выбранный трек во внутреннюю память, чтобы открыть его при следующем запуске.
+    private void saveLast(final Uri uri) {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    String name = null;
+                    Cursor c = getContentResolver().query(uri, null, null, null, null);
+                    if (c != null) {
+                        try {
+                            int i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                            if (i >= 0 && c.moveToFirst()) name = c.getString(i);
+                        } finally { c.close(); }
+                    }
+                    if (name == null || name.isEmpty()) name = uri.getLastPathSegment();
+                    File tmp = new File(getFilesDir(), "last_track.tmp");
+                    InputStream in = getContentResolver().openInputStream(uri);
+                    OutputStream out = new FileOutputStream(tmp);
+                    byte[] b = new byte[65536];
+                    int n;
+                    while ((n = in.read(b)) > 0) out.write(b, 0, n);
+                    out.close();
+                    in.close();
+                    File dst = new File(getFilesDir(), "last_track");
+                    if (dst.exists()) dst.delete();
+                    if (tmp.renameTo(dst)) {
+                        getSharedPreferences("app", MODE_PRIVATE).edit().putString("last_name", name).apply();
+                    }
+                } catch (Exception e) { /* не удалось сохранить: в следующий раз трек выберут заново */ }
+            }
+        }).start();
     }
 
     // Полный выход: закрыть окно, остановить службу и завершить процесс.

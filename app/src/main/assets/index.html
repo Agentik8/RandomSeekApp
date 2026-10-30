@@ -223,7 +223,6 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
     master = ctx.createGain();
     master.gain.value = val('vol') / 100;
     bus = ctx.createGain();
-    bus.connect(master);
     route();
     applyPitch(true);
   }
@@ -245,16 +244,14 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
   }
   $('bg').addEventListener('change', function () { route(); save(); });
 
-  $('file').addEventListener('change', function () {
-    var f = this.files && this.files[0];
-    if (!f) return;
+  function openTrack(name, getAB) {
     stop();
-    fname = f.name;
-    $('fname').textContent = 'Загрузка: ' + f.name;
+    fname = name;
+    $('fname').textContent = 'Загрузка: ' + name;
     $('play').disabled = true; $('jumpnow').disabled = true; $('rev').disabled = true;
     ensureCtx();
-    f.arrayBuffer().then(function (ab) {
-      meta = parseTags(ab, f.name);
+    getAB().then(function (ab) {
+      meta = parseTags(ab, name);
       return new Promise(function (res, rej) { ctx.decodeAudioData(ab, res, rej); });
     }).then(function (b) {
       buf = b; rbuf = null; pausedPos = 0; jumps = []; jumpCount = 0;
@@ -269,6 +266,11 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
     }).catch(function () {
       $('fname').textContent = 'Не удалось прочитать файл. Подойдут mp3, m4a, ogg, wav, flac.';
     });
+  }
+  $('file').addEventListener('change', function () {
+    var f = this.files && this.files[0];
+    if (!f) return;
+    openTrack(f.name, function () { return f.arrayBuffer(); });
   });
 
   function computePeaks(b, n) {
@@ -284,73 +286,82 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
 
 
   /* ---------- тональность ---------- */
+  var W = 0.12;        // длина линии задержки, с
+  var chains = [];     // цепочки обработки звука; новая включается плавно, старая затухает
+  var fadeTimer = 0;
   function pitchRate() { return $('vari').checked ? Math.pow(2, val('pitch') / 12) : 1; }
 
   // Сдвиг тона без изменения темпа: две линии задержки с пилообразным изменением задержки
   // и перекрывающимися окнами sin^2. Скорость чтения из линии равна коэффициенту сдвига.
-  function makeShifter(r) {
-    var W = 0.12, sr = ctx.sampleRate, slope = 1 - r, P = W / Math.abs(slope);
-    var n = Math.max(64, Math.round(P * sr));
-    var db = ctx.createBuffer(1, n, sr), eb = ctx.createBuffer(1, n, sr);
-    var dd = db.getChannelData(0), ed = eb.getChannelData(0);
-    for (var i = 0; i < n; i++) {
-      var ph = i / n;
-      dd[i] = slope > 0 ? W * ph : W * (1 - ph);
-      var sn = Math.sin(Math.PI * ph);
-      ed[i] = sn * sn;
-    }
-    var inp = ctx.createGain(), out = ctx.createGain(), srcs = [], t = ctx.currentTime + 0.02;
-    [0, P / 2].forEach(function (off) {
-      var dl = ctx.createDelay(W + 0.05); dl.delayTime.value = 0;
-      var g = ctx.createGain(); g.gain.value = 0;
-      var ds = ctx.createBufferSource(); ds.buffer = db; ds.loop = true; ds.connect(dl.delayTime);
-      var es = ctx.createBufferSource(); es.buffer = eb; es.loop = true; es.connect(g.gain);
-      inp.connect(dl); dl.connect(g); g.connect(out);
-      ds.start(t, off); es.start(t, off);
-      srcs.push(ds, es);
-    });
-    return { input: inp, output: out, srcs: srcs };
-  }
-
-  function dropShifter() {
-    if (!shifter) return;
-    shifter.srcs.forEach(function (x) { try { x.stop(); } catch (e) {} });
-    try { shifter.output.disconnect(); } catch (e) {}
-    try { shifter.input.disconnect(); } catch (e) {}
-    shifter = null;
-  }
-
-  function rebuildPitch() {
-    var st = val('pitch'), rate = pitchRate();
-    dropShifter();
-    try { bus.disconnect(); } catch (e) {}
-    if (st === 0 || $('vari').checked) {
-      bus.connect(master);
+  // Без сдвига звук идёт через постоянную задержку той же средней длины (W/2), поэтому
+  // при переключении между цепочками нет скачка по времени, и звук не «дёргается».
+  function makeChain(st, vari) {
+    var inp = ctx.createGain(), og = ctx.createGain(), srcs = [];
+    if (st === 0 || vari) {
+      var dl0 = ctx.createDelay(W + 0.05);
+      dl0.delayTime.value = W / 2;
+      inp.connect(dl0); dl0.connect(og);
     } else {
-      shifter = makeShifter(Math.pow(2, st / 12));
-      bus.connect(shifter.input);
-      shifter.output.connect(master);
+      var r = Math.pow(2, st / 12), sr = ctx.sampleRate, slope = 1 - r, P = W / Math.abs(slope);
+      var n = Math.max(64, Math.round(P * sr));
+      var db = ctx.createBuffer(1, n, sr), eb = ctx.createBuffer(1, n, sr);
+      var dd = db.getChannelData(0), ed = eb.getChannelData(0);
+      for (var i = 0; i < n; i++) {
+        var ph = i / n, sn = Math.sin(Math.PI * ph);
+        dd[i] = slope > 0 ? W * ph : W * (1 - ph);
+        ed[i] = sn * sn;
+      }
+      var t = ctx.currentTime + 0.02;
+      [0, P / 2].forEach(function (off) {
+        var dl = ctx.createDelay(W + 0.05); dl.delayTime.value = 0;
+        var g = ctx.createGain(); g.gain.value = 0;
+        var ds = ctx.createBufferSource(); ds.buffer = db; ds.loop = true; ds.connect(dl.delayTime);
+        var es = ctx.createBufferSource(); es.buffer = eb; es.loop = true; es.connect(g.gain);
+        inp.connect(dl); dl.connect(g); g.connect(og);
+        ds.start(t, off); es.start(t, off);
+        srcs.push(ds, es);
+      });
     }
+    return { input: inp, og: og, srcs: srcs, audible: false };
+  }
+
+  function disposeChain(c) {
+    c.srcs.forEach(function (x) { try { x.stop(); } catch (e) {} });
+    try { bus.disconnect(c.input); } catch (e) {}
+    try { c.og.disconnect(); } catch (e) {}
+    chains = chains.filter(function (x) { return x !== c; });
+  }
+
+  function rebuildPitch(first) {
+    var st = val('pitch'), vari = $('vari').checked, rate = pitchRate();
     if (playing && cur) { // новая скорость: пересчитываем опорную точку, чтобы позиция не скакала
       segPos = pos(); segTime = ctx.currentTime; segRate = rate;
       cur.src.playbackRate.value = rate;
     }
-    var t = ctx.currentTime;
-    bus.gain.cancelScheduledValues(t);
-    bus.gain.setValueAtTime(0, t);
-    bus.gain.linearRampToValueAtTime(1, t + 0.06);
+    // цепочка, которая не успела зазвучать, больше не нужна
+    chains.filter(function (c) { return !c.audible; }).forEach(disposeChain);
+    clearTimeout(fadeTimer);
+    var ch = makeChain(st, vari);
+    ch.og.gain.value = first ? 1 : 0;
+    ch.og.connect(master);
+    bus.connect(ch.input);
+    chains.push(ch);
+    if (first) { ch.audible = true; return; }
+    // сначала даём линиям задержки наполниться звуком, затем плавно переключаемся
+    fadeTimer = setTimeout(function () {
+      var t = ctx.currentTime, olds = chains.filter(function (c) { return c !== ch; });
+      ch.audible = true;
+      ch.og.gain.setTargetAtTime(1, t, 0.03);
+      olds.forEach(function (o) { o.og.gain.setTargetAtTime(0, t, 0.03); });
+      setTimeout(function () { olds.forEach(disposeChain); }, 400);
+    }, 160);
   }
 
-  // Небольшое затухание на время пересборки, чтобы не щёлкало при движении ползунка.
   function applyPitch(now) {
     if (!ctx) return;
     clearTimeout(pitchTimer);
-    if (now) { rebuildPitch(); return; }
-    var t = ctx.currentTime;
-    bus.gain.cancelScheduledValues(t);
-    bus.gain.setValueAtTime(bus.gain.value, t);
-    bus.gain.linearRampToValueAtTime(0, t + 0.03);
-    pitchTimer = setTimeout(rebuildPitch, 60);
+    if (now) { rebuildPitch(true); return; }
+    pitchTimer = setTimeout(function () { rebuildPitch(false); }, 120);
   }
   $('pitch').addEventListener('input', function () { applyPitch(false); });
   $('vari').addEventListener('change', function () { save(); applyPitch(false); });
@@ -603,6 +614,11 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
   if (window.Android) { var bgc = $('bg'); bgc.checked = false; bgc.closest('label').hidden = true; }
   window.addEventListener('resize', function () { cache = null; draw(); });
   draw();
+  // В приложении открываем трек, который играл в прошлый раз.
+  try {
+    var last = window.Android && Android.lastName ? Android.lastName() : '';
+    if (last) openTrack(last, function () { return fetch('/last').then(function (r) { if (!r.ok) throw new Error('no file'); return r.arrayBuffer(); }); });
+  } catch (e) {}
 })();
 </script>
 </body>
