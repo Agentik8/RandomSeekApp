@@ -17,14 +17,33 @@ import android.os.PowerManager;
 // Служба нужна только затем, чтобы Android не усыплял приложение, пока играет звук.
 public class PlayerService extends Service {
     private static final String CHANNEL = "playback";
+    public static final String ACTION_EXIT = "app.randomseek.EXIT";
     private PowerManager.WakeLock lock;
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && ACTION_EXIT.equals(intent.getAction())) {
+            if (lock != null && lock.isHeld()) lock.release();
+            lock = null;
+            stopForeground(true);
+            stopSelf();
+            if (MainActivity.instance != null) {
+                MainActivity.instance.exitApp();
+            } else {
+                android.os.Process.killProcess(android.os.Process.myPid());
+            }
+            return 2; // START_NOT_STICKY
+        }
         NotificationManager nm = getSystemService(NotificationManager.class);
         nm.createNotificationChannel(new NotificationChannel(CHANNEL, "Воспроизведение", 2));
         String title = intent != null ? intent.getStringExtra("title") : null;
+        String artist = intent != null ? intent.getStringExtra("artist") : null;
         if (title == null || title.length() == 0) title = "Играет";
+        if (artist == null || artist.length() == 0) artist = "Случайная перемотка";
+        Intent exitIntent = new Intent(this, PlayerService.class).setAction(ACTION_EXIT);
+        PendingIntent exit = PendingIntent.getService(this, 1, exitIntent, 0x04000000);
+        Notification.Action exitAction = new Notification.Action.Builder(
+                Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel), "Выход", exit).build();
         PendingIntent open = PendingIntent.getActivity(this, 0,
                 new Intent(this, MainActivity.class).addFlags(0x20000000),
                 0x04000000);
@@ -36,7 +55,9 @@ public class PlayerService extends Service {
         new Canvas(bm).drawCircle(24f, 24f, 18f, p);
         Notification n = new Notification.Builder(this, CHANNEL)
                 .setContentTitle(title)
-                .setContentText("Случайная перемотка")
+                .setContentText(artist)
+                .addAction(exitAction)
+                .setShowWhen(false)
                 .setSmallIcon(Icon.createWithBitmap(bm))
                 .setContentIntent(open)
                 .setOngoing(true)

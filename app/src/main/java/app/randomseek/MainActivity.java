@@ -18,16 +18,18 @@ public class MainActivity extends Activity {
     private static final int REQ_NOTIF = 2;
     private WebView web;
     private ValueCallback<Uri[]> chooser;
+    public static MainActivity instance;
 
     public class Bridge {
         @JavascriptInterface
-        public void setPlaying(final boolean playing, final String title) {
+        public void setPlaying(final boolean playing, final String title, final String artist) {
             runOnUiThread(new Runnable() {
                 @Override public void run() {
                     web.setKeepScreenOn(playing);
                     Intent i = new Intent(MainActivity.this, PlayerService.class);
                     if (playing) {
                         i.putExtra("title", title == null ? "" : title);
+                        i.putExtra("artist", artist == null ? "" : artist);
                         startForegroundService(i);
                     } else {
                         stopService(i);
@@ -40,6 +42,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        instance = this;
         requestWindowFeature(1); // без заголовка
         if (Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
@@ -85,8 +88,22 @@ public class MainActivity extends Activity {
         moveTaskToBack(true);
     }
 
+    // Полный выход: закрыть окно, остановить службу и завершить процесс.
+    public void exitApp() {
+        runOnUiThread(new Runnable() {
+            @Override public void run() {
+                stopService(new Intent(MainActivity.this, PlayerService.class));
+                finishAndRemoveTask();
+                new android.os.Handler().postDelayed(new Runnable() {
+                    @Override public void run() { android.os.Process.killProcess(android.os.Process.myPid()); }
+                }, 300);
+            }
+        });
+    }
+
     @Override
     protected void onDestroy() {
+        if (instance == this) instance = null;
         stopService(new Intent(this, PlayerService.class));
         if (web != null) web.destroy();
         super.onDestroy();

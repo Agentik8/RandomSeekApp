@@ -116,7 +116,7 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
   var ctx = null, master = null, dest = null, bgEl = null, buf = null, peaks = null;
   var cur = null, segPos = 0, segTime = 0, segDir = 1, playing = false, pausedPos = 0, timer = null;
   var rev = false, rbuf = null; // rbuf: копия трека, записанная задом наперёд (создаётся при первом реверсе)
-  var jumps = [], jumpCount = 0, mode = 'near', raf = 0, lastFrame = 0, wakeLock = null, fname = '';
+  var jumps = [], jumpCount = 0, mode = 'near', raf = 0, lastFrame = 0, wakeLock = null, fname = '', meta = { title: '', artist: '' };
   var cache = null; // готовые картинки волны, чтобы не перерисовывать 700 столбцов каждый кадр
 
   function fmt(s) { s = Math.max(0, s | 0); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
@@ -170,6 +170,44 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
   $('m-near').onclick = function () { setMode('near'); };
   $('m-any').onclick = function () { setMode('any'); };
 
+
+  /* ---------- название и автор трека ---------- */
+  function decodeText(b) {
+    var enc = b[0], d = b.subarray(1), label = ['windows-1251', 'utf-16', 'utf-16be', 'utf-8'][enc] || 'utf-8';
+    var s = '';
+    try { s = new TextDecoder(label).decode(d); } catch (e) { s = ''; }
+    return s.replace(/\0+$/g, '').replace(/^﻿/, '').trim();
+  }
+  function parseTags(ab, name) {
+    var t = '', a = '';
+    try {
+      var u8 = new Uint8Array(ab), v = new DataView(ab);
+      if (u8[0] === 0x49 && u8[1] === 0x44 && u8[2] === 0x33) {
+        var ver = u8[3];
+        var size = ((u8[6] & 127) << 21) | ((u8[7] & 127) << 14) | ((u8[8] & 127) << 7) | (u8[9] & 127);
+        var p = 10, end = Math.min(10 + size, u8.length);
+        while (p + 10 <= end) {
+          var id = String.fromCharCode(u8[p], u8[p + 1], u8[p + 2], u8[p + 3]);
+          if (!/^[A-Z0-9]{4}$/.test(id)) break;
+          var fs = ver === 4
+            ? ((u8[p + 4] & 127) << 21) | ((u8[p + 5] & 127) << 14) | ((u8[p + 6] & 127) << 7) | (u8[p + 7] & 127)
+            : v.getUint32(p + 4);
+          if (fs <= 0 || p + 10 + fs > end) break;
+          if (id === 'TIT2') t = decodeText(u8.subarray(p + 10, p + 10 + fs));
+          if (id === 'TPE1') a = decodeText(u8.subarray(p + 10, p + 10 + fs));
+          p += 10 + fs;
+        }
+      }
+    } catch (e) {}
+    if (!t) {
+      var base = name.replace(/\.[^.]+$/, '').replace(/_/g, ' ').trim();
+      var i = base.indexOf(' - ');
+      if (i > 0) { if (!a) a = base.slice(0, i).trim(); t = base.slice(i + 3).trim(); }
+      else t = base;
+    }
+    return { title: t, artist: a };
+  }
+
   /* ---------- аудио ---------- */
   function ensureCtx() {
     if (ctx) return;
@@ -205,6 +243,7 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
     $('play').disabled = true; $('jumpnow').disabled = true; $('rev').disabled = true;
     ensureCtx();
     f.arrayBuffer().then(function (ab) {
+      meta = parseTags(ab, f.name);
       return new Promise(function (res, rej) { ctx.decodeAudioData(ab, res, rej); });
     }).then(function (b) {
       buf = b; rbuf = null; pausedPos = 0; jumps = []; jumpCount = 0;
@@ -304,7 +343,7 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
     ensureCtx();
     ctx.resume();
     playing = true;
-    try { if (window.Android) Android.setPlaying(true, fname); } catch (e) {}
+    try { if (window.Android) Android.setPlaying(true, meta.title, meta.artist); } catch (e) {}
     if ($('bg').checked && bgEl) bgEl.play().catch(function () {});
     startAt(rev ? (pausedPos <= 0.2 ? buf.duration : pausedPos) : (pausedPos >= buf.duration - 0.2 ? 0 : pausedPos));
     $('play').textContent = 'Пауза';
@@ -316,7 +355,7 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
     if (!playing) return;
     pausedPos = pos();
     playing = false;
-    try { if (window.Android) Android.setPlaying(false, ''); } catch (e) {}
+    try { if (window.Android) Android.setPlaying(false, '', ''); } catch (e) {}
     clearTimeout(timer);
     var fd = 0;
     if (cur) {
@@ -373,7 +412,7 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
 
   function setMeta() {
     if (!('mediaSession' in navigator) || !window.MediaMetadata) return;
-    navigator.mediaSession.metadata = new MediaMetadata({ title: fname, artist: 'Случайная перемотка' });
+    navigator.mediaSession.metadata = new MediaMetadata({ title: meta.title || fname, artist: meta.artist || 'Случайная перемотка' });
     try {
       navigator.mediaSession.setActionHandler('play', function () { if (!playing) play(); });
       navigator.mediaSession.setActionHandler('pause', function () { if (playing) stop(); });
