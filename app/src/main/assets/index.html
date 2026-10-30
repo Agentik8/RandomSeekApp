@@ -100,6 +100,11 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
       <input id="xf" type="range" autocomplete="off" min="0" max="2000" step="50" value="400">
     </div>
     <div class="row">
+      <label class="l" for="pitch"><span>Тональность, полутонов</span><output id="o-pitch"></output></label>
+      <input id="pitch" type="range" autocomplete="off" min="-12" max="12" step="1" value="0">
+    </div>
+    <label class="chk"><input type="checkbox" id="vari"><span>Менять скорость вместе с тональностью<small>Как у пластинки: выше тон, быстрее трек. Выключено: темп не меняется.</small></span></label>
+    <div class="row">
       <label class="l" for="vol"><span>Громкость</span><output id="o-vol"></output></label>
       <input id="vol" type="range" autocomplete="off" min="0" max="100" step="1" value="80">
     </div>
@@ -113,8 +118,8 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 window.onerror = function (m, u, l) { var e = document.getElementById('fname'); if (e) e.textContent = 'Ошибка скрипта: ' + m + ' (строка ' + l + ')'; };
 (function () {
   var $ = function (id) { return document.getElementById(id); };
-  var ctx = null, master = null, dest = null, bgEl = null, buf = null, peaks = null;
-  var cur = null, segPos = 0, segTime = 0, segDir = 1, playing = false, pausedPos = 0, timer = null;
+  var ctx = null, master = null, bus = null, shifter = null, pitchTimer = 0, edgeTimer = 0, dest = null, bgEl = null, buf = null, peaks = null;
+  var cur = null, segPos = 0, segTime = 0, segDir = 1, segRate = 1, playing = false, pausedPos = 0, timer = null;
   var rev = false, rbuf = null; // rbuf: копия трека, записанная задом наперёд (создаётся при первом реверсе)
   var jumps = [], jumpCount = 0, mode = 'near', raf = 0, lastFrame = 0, wakeLock = null, fname = '', meta = { title: '', artist: '' };
   var cache = null; // готовые картинки волны, чтобы не перерисовывать 700 столбцов каждый кадр
@@ -125,7 +130,7 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
   function dec(v) { return String(v).replace('.', ','); }
   function pos() {
     if (!buf) return 0;
-    return playing ? Math.max(0, Math.min(buf.duration, segPos + segDir * (ctx.currentTime - segTime))) : pausedPos;
+    return playing ? Math.max(0, Math.min(buf.duration, segPos + segDir * segRate * (ctx.currentTime - segTime))) : pausedPos;
   }
 
   /* ---------- настройки ---------- */
@@ -135,11 +140,12 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
     jit: function (v) { return v === 0 ? 'нет' : '±' + v + '%'; },
     range: function (v) { return v >= 120 ? 'без ограничения' : '±' + v + ' с'; },
     xf: function (v) { return v === 0 ? 'выкл' : dec(v / 1000) + ' с'; },
+    pitch: function (v) { return (v > 0 ? '+' : v < 0 ? '\u2212' : '') + Math.abs(v); },
     vol: function (v) { return v + '%'; }
   };
   function save() {
     try {
-      var o = { mode: mode, wake: $('wake').checked, bg: $('bg').checked };
+      var o = { mode: mode, wake: $('wake').checked, bg: $('bg').checked, vari: $('vari').checked };
       Object.keys(fmts).forEach(function (k) { o[k] = $(k).value; });
       localStorage.setItem(KEY, JSON.stringify(o));
     } catch (e) {}
@@ -152,6 +158,7 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
       if (o.mode) mode = o.mode;
       if (o.wake != null) $('wake').checked = !!o.wake;
       if (o.bg != null) $('bg').checked = !!o.bg;
+      if (o.vari != null) $('vari').checked = !!o.vari;
     } catch (e) {}
   }
   Object.keys(fmts).forEach(function (k) {
@@ -214,7 +221,10 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
     ctx = new (window.AudioContext || window.webkitAudioContext)();
     master = ctx.createGain();
     master.gain.value = val('vol') / 100;
+    bus = ctx.createGain();
+    bus.connect(master);
     route();
+    applyPitch(true);
   }
   function route() {
     if (!ctx) return;
@@ -271,6 +281,79 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
     return out;
   }
 
+
+  /* ---------- тональность ---------- */
+  function pitchRate() { return $('vari').checked ? Math.pow(2, val('pitch') / 12) : 1; }
+
+  // Сдвиг тона без изменения темпа: две линии задержки с пилообразным изменением задержки
+  // и перекрывающимися окнами sin^2. Скорость чтения из линии равна коэффициенту сдвига.
+  function makeShifter(r) {
+    var W = 0.12, sr = ctx.sampleRate, slope = 1 - r, P = W / Math.abs(slope);
+    var n = Math.max(64, Math.round(P * sr));
+    var db = ctx.createBuffer(1, n, sr), eb = ctx.createBuffer(1, n, sr);
+    var dd = db.getChannelData(0), ed = eb.getChannelData(0);
+    for (var i = 0; i < n; i++) {
+      var ph = i / n;
+      dd[i] = slope > 0 ? W * ph : W * (1 - ph);
+      var sn = Math.sin(Math.PI * ph);
+      ed[i] = sn * sn;
+    }
+    var inp = ctx.createGain(), out = ctx.createGain(), srcs = [], t = ctx.currentTime + 0.02;
+    [0, P / 2].forEach(function (off) {
+      var dl = ctx.createDelay(W + 0.05); dl.delayTime.value = 0;
+      var g = ctx.createGain(); g.gain.value = 0;
+      var ds = ctx.createBufferSource(); ds.buffer = db; ds.loop = true; ds.connect(dl.delayTime);
+      var es = ctx.createBufferSource(); es.buffer = eb; es.loop = true; es.connect(g.gain);
+      inp.connect(dl); dl.connect(g); g.connect(out);
+      ds.start(t, off); es.start(t, off);
+      srcs.push(ds, es);
+    });
+    return { input: inp, output: out, srcs: srcs };
+  }
+
+  function dropShifter() {
+    if (!shifter) return;
+    shifter.srcs.forEach(function (x) { try { x.stop(); } catch (e) {} });
+    try { shifter.output.disconnect(); } catch (e) {}
+    try { shifter.input.disconnect(); } catch (e) {}
+    shifter = null;
+  }
+
+  function rebuildPitch() {
+    var st = val('pitch'), rate = pitchRate();
+    dropShifter();
+    try { bus.disconnect(); } catch (e) {}
+    if (st === 0 || $('vari').checked) {
+      bus.connect(master);
+    } else {
+      shifter = makeShifter(Math.pow(2, st / 12));
+      bus.connect(shifter.input);
+      shifter.output.connect(master);
+    }
+    if (playing && cur) { // новая скорость: пересчитываем опорную точку, чтобы позиция не скакала
+      segPos = pos(); segTime = ctx.currentTime; segRate = rate;
+      cur.src.playbackRate.value = rate;
+    }
+    var t = ctx.currentTime;
+    bus.gain.cancelScheduledValues(t);
+    bus.gain.setValueAtTime(0, t);
+    bus.gain.linearRampToValueAtTime(1, t + 0.06);
+  }
+
+  // Небольшое затухание на время пересборки, чтобы не щёлкало при движении ползунка.
+  function applyPitch(now) {
+    if (!ctx) return;
+    clearTimeout(pitchTimer);
+    if (now) { rebuildPitch(); return; }
+    var t = ctx.currentTime;
+    bus.gain.cancelScheduledValues(t);
+    bus.gain.setValueAtTime(bus.gain.value, t);
+    bus.gain.linearRampToValueAtTime(0, t + 0.03);
+    pitchTimer = setTimeout(rebuildPitch, 60);
+  }
+  $('pitch').addEventListener('input', function () { applyPitch(false); });
+  $('vari').addEventListener('change', function () { save(); applyPitch(false); });
+
   // Громкость вручную: AudioParam.value в Firefox во время плавного изменения не обновляется.
   function lvl(c, t) { return c.xf > 0 ? Math.min(1, Math.max(0, (t - c.t0) / c.xf)) : 1; }
 
@@ -287,10 +370,11 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
   function startAt(p) {
     var xf = Math.min(val('xf') / 1000, val('interval') * 0.5), t = ctx.currentTime;
     var src = ctx.createBufferSource(); src.buffer = rev ? getRev() : buf;
+    var rate = pitchRate(); src.playbackRate.value = rate; segRate = rate;
     var g = ctx.createGain();
     g.gain.setValueAtTime(xf > 0 ? 0 : 1, t);
     if (xf > 0) g.gain.linearRampToValueAtTime(1, t + xf);
-    src.connect(g); g.connect(master);
+    src.connect(g); g.connect(bus);
     var off = rev ? buf.duration - p : p;
     off = Math.min(Math.max(0, off), buf.duration - 0.05);
     src.start(t, off);
@@ -349,6 +433,7 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
     $('play').textContent = 'Пауза';
     lockScreen();
     schedule(); loop();
+    clearInterval(edgeTimer); edgeTimer = setInterval(checkEdge, 100);
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
   }
   function stop() {
@@ -357,6 +442,7 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
     playing = false;
     try { if (window.Android) Android.setPlaying(false, '', ''); } catch (e) {}
     clearTimeout(timer);
+    clearInterval(edgeTimer);
     var fd = 0;
     if (cur) {
       var t = ctx.currentTime, old = cur;
@@ -385,6 +471,7 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
     $('rev').setAttribute('aria-pressed', String(rev));
     $('rev').textContent = rev ? 'Реверс: вкл' : 'Реверс';
     if (playing) { startAt(pos()); schedule(); }
+    if (!rev) setTimeout(function () { if (!rev && !playing) rbuf = null; }, 4000);
   }
   $('rev').onclick = toggleRev;
   $('play').onclick = toggle;
@@ -492,12 +579,17 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
     c.fillRect(Math.round(x) - 1, 0, 2, h);
   }
 
+  function checkEdge() {
+    if (!playing || !buf) return;
+    var pp = pos();
+    if (segDir > 0 ? pp >= buf.duration - 0.05 : pp <= 0.05) { jump(); schedule(); }
+  }
+
   function loop() {
     cancelAnimationFrame(raf);
     function f(ts) {
       if (!playing) return;
-      var pp = pos();
-      if (segDir > 0 ? pp >= buf.duration - 0.05 : pp <= 0.05) { jump(); schedule(); }
+      if (document.hidden) { raf = requestAnimationFrame(f); return; }
       if (ts - lastFrame > 33) { lastFrame = ts; draw(); } // около 30 кадров в секунду достаточно
       raf = requestAnimationFrame(f);
     }
