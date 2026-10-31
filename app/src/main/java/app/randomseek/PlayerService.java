@@ -42,8 +42,6 @@ public class PlayerService extends Service {
         if (artist == null || artist.length() == 0) artist = "Случайная перемотка";
         Intent exitIntent = new Intent(this, PlayerService.class).setAction(ACTION_EXIT);
         PendingIntent exit = PendingIntent.getService(this, 1, exitIntent, 0x04000000);
-        Notification.Action exitAction = new Notification.Action.Builder(
-                Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel), "Выход", exit).build();
         PendingIntent open = PendingIntent.getActivity(this, 0,
                 new Intent(this, MainActivity.class).addFlags(0x20000000),
                 0x04000000);
@@ -56,7 +54,6 @@ public class PlayerService extends Service {
         Notification n = new Notification.Builder(this, CHANNEL)
                 .setContentTitle(title)
                 .setContentText(artist)
-                .addAction(exitAction)
                 .setShowWhen(false)
                 .setSmallIcon(Icon.createWithBitmap(bm))
                 .setContentIntent(open)
@@ -74,6 +71,16 @@ public class PlayerService extends Service {
             lock.acquire(6 * 60 * 60 * 1000L);
         }
         return 2; // START_NOT_STICKY
+    }
+
+    // Приложение смахнули из списка недавних: закрываем всё полностью.
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        if (lock != null && lock.isHeld()) lock.release();
+        lock = null;
+        stopForeground(true);
+        stopSelf();
+        android.os.Process.killProcess(android.os.Process.myPid());
     }
 
     @Override
