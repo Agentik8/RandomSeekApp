@@ -60,7 +60,8 @@ public class PlayerService extends Service {
                 .setShowWhen(false)
                 .setSmallIcon(Icon.createWithBitmap(bm))
                 .setContentIntent(open)
-                .setOngoing(true)
+                .setOngoing(false)
+                .setDeleteIntent(exit)
                 .build();
         if (Build.VERSION.SDK_INT >= 29) {
             startForeground(1, n, 2); // 2 = mediaPlayback

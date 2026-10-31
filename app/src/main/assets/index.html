@@ -119,7 +119,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 window.onerror = function (m, u, l) { var e = document.getElementById('fname'); if (e) e.textContent = 'Ошибка скрипта: ' + m + ' (строка ' + l + ')'; };
 (function () {
   var $ = function (id) { return document.getElementById(id); };
-  var ctx = null, master = null, bus = null, shifter = null, pitchTimer = 0, edgeTimer = 0, dest = null, bgEl = null, buf = null, peaks = null;
+  var ctx = null, master = null, bus = null, wnode = null, wstate = 'none', shifter = null, pitchTimer = 0, edgeTimer = 0, dest = null, bgEl = null, buf = null, peaks = null;
   var cur = null, segPos = 0, segTime = 0, segDir = 1, segRate = 1, playing = false, pausedPos = 0, timer = null;
   var rev = false, rbuf = null; // rbuf: копия трека, записанная задом наперёд (создаётся при первом реверсе)
   var jumps = [], jumpCount = 0, mode = 'near', raf = 0, lastFrame = 0, wakeLock = null, fname = '', meta = { title: '', artist: '' };
@@ -132,6 +132,116 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
   function pos() {
     if (!buf) return 0;
     return playing ? Math.max(0, Math.min(buf.duration, segPos + segDir * segRate * (ctx.currentTime - segTime))) : pausedPos;
+  }
+
+  /* ---------- сдвиг тона (работает в отдельном аудио-потоке) ---------- */
+  // WSOLA: звук режется на короткие зёрна, для каждого подбирается место склейки с наилучшим
+  // совпадением формы волны, затем результат пересчитывается по частоте дискретизации.
+  // Так темп сохраняется, а склейки почти не слышны даже при больших сдвигах.
+  function pitchWorkletBody() {
+    var LO_MS = 10, LM_MS = 20, SEEK_MS = 20;
+    class PitchShifter extends AudioWorkletProcessor {
+      static get parameterDescriptors() {
+        return [{ name: 'rate', defaultValue: 1, minValue: 0.25, maxValue: 4, automationRate: 'k-rate' }];
+      }
+      constructor() {
+        super();
+        var sr = sampleRate;
+        this.lo = Math.round(sr * LO_MS / 1000);
+        this.lm = Math.round(sr * LM_MS / 1000);
+        this.half = Math.round(sr * SEEK_MS / 1000) >> 1;
+        this.cap = 1 << 17;
+        this.inL = new Float32Array(this.cap); this.inR = new Float32Array(this.cap); this.inM = new Float32Array(this.cap);
+        this.inLen = 0; this.inBase = 0;
+        this.midCap = 1 << 15;
+        this.midL = new Float32Array(this.midCap); this.midR = new Float32Array(this.midCap);
+        this.midLen = 0; this.rp = 1;
+        this.tailL = new Float32Array(this.lo); this.tailR = new Float32Array(this.lo); this.tailM = new Float32Array(this.lo);
+        this.hasTail = false;
+        this.started = false;
+        this.nominal = this.half + 2;
+        this.r = 1;
+        this.win = new Float32Array(this.lo);
+        for (var i = 0; i < this.lo; i++) this.win[i] = 0.5 - 0.5 * Math.cos(Math.PI * (i + 0.5) / this.lo);
+      }
+      // Делает один «зерно»: ищет лучшее место склейки и добавляет звук в промежуточный буфер.
+      grain() {
+        var lo = this.lo, lm = this.lm, half = this.half;
+        var c = Math.round(this.nominal) - this.inBase;
+        // Первое зерно ждёт запас входных данных: он гасит колебания скорости при смене тональности.
+        var slack = this.started ? 0 : lo + lm;
+        if (this.inLen < c + half + 2 * lo + lm + 2 + slack) return false;
+        var inM = this.inM, ref = this.tailM, best = 0;
+        if (this.hasTail) {
+          var bestScore = -Infinity;
+          for (var q = 0; q <= 2 * half; q++) {
+            var k = (q & 1) ? -((q + 1) >> 1) : (q >> 1);   // 0, -1, 1, -2, 2 ...
+            var a = c + k;
+            if (a < 0) continue;
+            var dot = 0, en = 0;
+            for (var i = 0; i < lo; i += 2) { var x = inM[a + i]; dot += x * ref[i]; en += x * x; }
+            var score = dot / Math.sqrt(en + 1e-6);
+            if (score > bestScore) { bestScore = score; best = k; }
+          }
+        }
+        var a0 = c + best;
+        if (a0 < 0) a0 = 0;
+        if (this.midLen + lo + lm > this.midCap) return false;
+        var mL = this.midL, mR = this.midR, o = this.midLen, w = this.win, inL = this.inL, inR = this.inR;
+        var tL = this.tailL, tR = this.tailR;
+        for (var j = 0; j < lo; j++) {
+          var wj = w[j], hv = this.hasTail ? 1 - wj : 0;
+          mL[o + j] = tL[j] * hv + inL[a0 + j] * wj;
+          mR[o + j] = tR[j] * hv + inR[a0 + j] * wj;
+        }
+        for (var m = 0; m < lm; m++) { mL[o + lo + m] = inL[a0 + lo + m]; mR[o + lo + m] = inR[a0 + lo + m]; }
+        this.midLen += lo + lm;
+        var s = a0 + lo + lm;
+        for (var t = 0; t < lo; t++) { tL[t] = inL[s + t]; tR[t] = inR[s + t]; this.tailM[t] = inM[s + t]; }
+        this.hasTail = true;
+        this.started = true;
+        this.nominal += (lo + lm) / this.r;
+        return true;
+      }
+      process(inputs, outputs, params) {
+        var out = outputs[0], n = out[0].length, outL = out[0], outR = out[1] || out[0];
+        var inp = inputs[0], l = inp && inp[0], rr = inp && (inp[1] || inp[0]);
+        // новые входные отсчёты в очередь
+        if (this.inLen + n > this.cap) {
+          var drop = Math.max(Math.floor(this.nominal) - this.inBase - this.half - 4, this.inLen + n - this.cap);
+          if (drop > 0) {
+            this.inL.copyWithin(0, drop, this.inLen); this.inR.copyWithin(0, drop, this.inLen); this.inM.copyWithin(0, drop, this.inLen);
+            this.inLen -= drop; this.inBase += drop;
+            if (this.nominal < this.inBase + this.half + 2) this.nominal = this.inBase + this.half + 2;
+          }
+        }
+        for (var i = 0; i < n; i++) {
+          var a = l ? l[i] : 0, b = rr ? rr[i] : 0, p = this.inLen + i;
+          this.inL[p] = a; this.inR[p] = b; this.inM[p] = (a + b) * 0.5;
+        }
+        this.inLen += n;
+        var target = params.rate[0];
+        var mL = this.midL, mR = this.midR;
+        for (var s = 0; s < n; s++) {
+          this.r += (target - this.r) * 0.0005;
+          while (this.rp + 3 >= this.midLen) { if (!this.grain()) break; }
+          if (this.rp + 3 >= this.midLen) { outL[s] = 0; outR[s] = 0; continue; }
+          var ip = Math.floor(this.rp), f = this.rp - ip;
+          var y0 = mL[ip - 1], y1 = mL[ip], y2 = mL[ip + 1], y3 = mL[ip + 2];
+          outL[s] = y1 + 0.5 * f * (y2 - y0 + f * (2 * y0 - 5 * y1 + 4 * y2 - y3 + f * (3 * (y1 - y2) + y3 - y0)));
+          y0 = mR[ip - 1]; y1 = mR[ip]; y2 = mR[ip + 1]; y3 = mR[ip + 2];
+          outR[s] = y1 + 0.5 * f * (y2 - y0 + f * (2 * y0 - 5 * y1 + 4 * y2 - y3 + f * (3 * (y1 - y2) + y3 - y0)));
+          this.rp += this.r;
+        }
+        if (this.rp > 8192) {
+          var d = Math.floor(this.rp) - 4;
+          this.midL.copyWithin(0, d, this.midLen); this.midR.copyWithin(0, d, this.midLen);
+          this.midLen -= d; this.rp -= d;
+        }
+        return true;
+      }
+    }
+    registerProcessor('pitch-shifter', PitchShifter);
   }
 
   /* ---------- настройки ---------- */
@@ -224,7 +334,7 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
     master.gain.value = val('vol') / 100;
     bus = ctx.createGain();
     route();
-    applyPitch(true);
+    initPitchNode();
   }
   function route() {
     if (!ctx) return;
@@ -357,9 +467,49 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
     }, 160);
   }
 
+  // Во сколько раз сдвигает тон обработчик. В режиме «Тон + скорость» тон меняет сама скорость
+  // воспроизведения, поэтому обработчик ничего не делает.
+  function shiftRatio() { return $('vari').checked ? 1 : Math.pow(2, val('pitch') / 12); }
+
+  function applyRate() {
+    var rate = pitchRate();
+    if (playing && cur) { // новая скорость: пересчитываем опорную точку, чтобы позиция не скакала
+      segPos = pos(); segTime = ctx.currentTime; segRate = rate;
+      cur.src.playbackRate.value = rate;
+    }
+  }
+
+  function initPitchNode() {
+    if (wstate !== 'none') return;
+    if (!ctx.audioWorklet || !window.Blob || !window.URL || !URL.createObjectURL || !window.AudioWorkletNode) {
+      wstate = 'fail'; applyPitch(true); return;
+    }
+    wstate = 'pending';
+    bus.connect(master); // пока загружается обработчик, звук идёт напрямую
+    var url = URL.createObjectURL(new Blob(['(' + pitchWorkletBody.toString() + ')()'], { type: 'text/javascript' }));
+    ctx.audioWorklet.addModule(url).then(function () {
+      wnode = new AudioWorkletNode(ctx, 'pitch-shifter', {
+        numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2],
+        channelCount: 2, channelCountMode: 'explicit',
+        parameterData: { rate: shiftRatio() }
+      });
+      try { bus.disconnect(master); } catch (e) {}
+      bus.connect(wnode); wnode.connect(master);
+      wstate = 'ok';
+    }).catch(function () {
+      wstate = 'fail';
+      try { bus.disconnect(); } catch (e) {}
+      applyPitch(true);
+    });
+  }
+
   function applyPitch(now) {
     if (!ctx) return;
     clearTimeout(pitchTimer);
+    applyRate();
+    if (wstate === 'ok') { wnode.parameters.get('rate').value = shiftRatio(); return; } // плавно, без пересборки
+    if (wstate === 'pending') return; // значение подхватится при создании обработчика
+    // запасной вариант, если аудио-обработчики недоступны: две линии задержки
     if (now) { rebuildPitch(true); return; }
     pitchTimer = setTimeout(function () { rebuildPitch(false); }, 120);
   }
@@ -466,6 +616,7 @@ window.onerror = function (m, u, l) { var e = document.getElementById('fname'); 
       cur = null;
     }
     if (bgEl) setTimeout(function () { if (!playing) bgEl.pause(); }, fd * 1000 + 100);
+    setTimeout(function () { if (!playing && ctx && ctx.state === 'running') ctx.suspend().catch(function () {}); }, fd * 1000 + 400);
     $('play').textContent = 'Играть';
     unlockScreen();
     draw();
